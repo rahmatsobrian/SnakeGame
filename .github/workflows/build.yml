@@ -1,0 +1,146 @@
+name: Build Snake APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download Gradle Wrapper JAR
+        run: |
+          mkdir -p gradle/wrapper
+          curl -L -o gradle/wrapper/gradle-wrapper.jar \
+            "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Print build environment
+        run: |
+          echo "======================================================"
+          echo "  SNAKEGAME BUILD ENVIRONMENT"
+          echo "======================================================"
+          echo "  Date      : $(date)"
+          echo "  Commit    : ${{ github.sha }}"
+          echo "  Branch    : ${{ github.ref_name }}"
+          echo "  Java      : $(java -version 2>&1 | head -1)"
+          echo "======================================================"
+
+      - name: Build Debug APK
+        run: |
+          mkdir -p build-logs
+          set -o pipefail
+          ./gradlew assembleDebug --stacktrace --info 2>&1 | tee build-logs/debug-build.log
+
+      - name: Build Release APK (unsigned)
+        run: |
+          mkdir -p build-logs
+          set -o pipefail
+          ./gradlew assembleRelease --stacktrace --info 2>&1 | tee build-logs/release-build.log
+
+      - name: Summarize build errors
+        if: failure()
+        run: |
+          echo "======================================================"
+          echo "  BUILD FAILED — ERROR SUMMARY"
+          echo "======================================================"
+          if [ -f build-logs/debug-build.log ]; then
+            grep -E "error:|FAILED|Exception|Could not|> Task|BUILD" \
+              build-logs/debug-build.log | tail -60 || echo "(no errors found)"
+          fi
+
+      - name: Generate compact log for Claude
+        if: always()
+        run: |
+          mkdir -p build-logs
+          {
+            echo "======================================================"
+            echo "  SNAKEGAME — GITHUB ACTIONS BUILD LOG"
+            echo "======================================================"
+            echo "  Date      : $(date)"
+            echo "  Commit    : ${{ github.sha }}"
+            echo "  Branch    : ${{ github.ref_name }}"
+            echo "  Java      : $(java -version 2>&1 | head -1)"
+            echo "======================================================"
+            echo ""
+            echo "=== DEBUG BUILD — errors & warnings only ============"
+            if [ -f build-logs/debug-build.log ]; then
+              grep -E "^(FAILURE|BUILD|error:|warning:|w: |e: |> Task|Caused by|Exception|Could not)" \
+                build-logs/debug-build.log | head -120 || echo "  (clean build)"
+            else
+              echo "  (log not found)"
+            fi
+            echo ""
+            echo "=== RELEASE BUILD — errors & warnings only =========="
+            if [ -f build-logs/release-build.log ]; then
+              grep -E "^(FAILURE|BUILD|error:|warning:|w: |e: |> Task|Caused by|Exception|Could not)" \
+                build-logs/release-build.log | head -120 || echo "  (clean build)"
+            else
+              echo "  (log not found)"
+            fi
+            echo ""
+            echo "=== DEBUG BUILD — last 80 lines ====================="
+            if [ -f build-logs/debug-build.log ]; then
+              tail -80 build-logs/debug-build.log
+            fi
+            echo ""
+            echo "======================================================"
+            echo "  END OF LOG"
+            echo "======================================================"
+          } > build-logs/summary-for-claude.txt
+
+      - name: Upload Debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnakeGame-Debug-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Upload Release APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnakeGame-Release-APK
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 30
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Logs-${{ github.run_number }}
+          path: build-logs/
+          retention-days: 14
